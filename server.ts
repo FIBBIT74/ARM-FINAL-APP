@@ -3,6 +3,13 @@ import { createServer as createViteServer } from "vite";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { config } from "dotenv";
+import { GoogleGenAI } from "@google/genai";
+
+config();
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const GEMINI_MODEL = "gemini-2.0-flash";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,7 +52,7 @@ if (!fs.existsSync(ORGANIZATIONS_FILE)) {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = 3009;
 
   app.use(express.json());
 
@@ -310,6 +317,78 @@ async function startServer() {
       review_count: analyzed.filter((p: any) => p.processing_result?.decision === "REVIEW").length,
       recent: procurements.slice(-10).reverse()
     });
+  });
+
+  // --- AI ENDPOINTS (server-side Gemini calls) ---
+
+  // Analyze procurement with Gemini
+  app.post("/api/v1/procurements/:id/analyze", async (req, res) => {
+    const procurements = readData(PROCUREMENTS_FILE);
+    const index = procurements.findIndex((p: any) => p.id === parseInt(req.params.id));
+    if (index === -1) return res.status(404).json({ error: "Not found" });
+
+    const p = procurements[index];
+    procurements[index].processing_status = "processing";
+    writeData(PROCUREMENTS_FILE, procurements);
+
+    try {
+      const prompt = `Ты эксперт по государственным закупкам (44-ФЗ). Проведи комплексный анализ закупки.
+
+Данные закупки:
+- Предмет: ${p.subject}
+- НМЦК: ${p.nmck} руб.
+- ОКПД2: ${p.okpd2_code} (${p.okpd2_name})
+- ИНН контрагента: ${p.contractor_inn || "не указан"}
+- Примечания: ${p.notes || "нет"}
+
+Верни ТОЛЬКО валидный JSON без пояснений:
+{
+  "decision": "GO" | "NO-GO" | "REVIEW",
+  "risk": "low" | "medium" | "high" | "critical",
+  "summary": "краткое резюме на русском (2-3 предложения)",
+  "details": {
+    "finance": "финансовый анализ",
+    "legal": "правовой анализ по 44-ФЗ",
+    "technical": "оценка технического задания",
+    "compliance": "проверка соответствия требованиям"
+  }
+}`;
+
+      const result = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: { responseMimeType: "application/json" }
+      });
+
+      const analysis = JSON.parse(result.text || "{}");
+      procurements[index].processing_status = "completed";
+      procurements[index].processing_result = analysis;
+      procurements[index].updated_at = new Date().toISOString();
+      writeData(PROCUREMENTS_FILE, procurements);
+      res.json({ success: true, result: analysis });
+    } catch (e: any) {
+      procurements[index].processing_status = "not_started";
+      writeData(PROCUREMENTS_FILE, procurements);
+      res.status(500).json({ error: "AI analysis failed", detail: e.message });
+    }
+  });
+
+  // AI Agent chat
+  app.post("/api/v1/chat", async (req, res) => {
+    const { message, agentPrompt } = req.body;
+    if (!message) return res.status(400).json({ error: "message required" });
+
+    try {
+      const result = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [
+          { role: "user", parts: [{ text: (agentPrompt || "") + "\n\nВопрос: " + message }] }
+        ]
+      });
+      res.json({ response: result.text });
+    } catch (e: any) {
+      res.status(500).json({ error: "AI chat failed", detail: e.message });
+    }
   });
 
   // Vite middleware for development

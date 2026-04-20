@@ -33,7 +33,6 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
-import { GoogleGenAI } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 
 // --- UTILS ---
@@ -42,8 +41,6 @@ function cn(...inputs: ClassValue[]) {
 }
 
 const API_BASE = ""; // Relative to host
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 // --- TYPES ---
 interface Procurement {
@@ -151,51 +148,9 @@ export default function App() {
   const startAIAnalysis = async () => {
     if (!currentProcurement.id) return;
     setLoading(true);
-    
-    // Update status to processing on server
-    await fetch(`${API_BASE}/api/v1/procurements/${currentProcurement.id}/process`, { method: 'POST' });
-    
     try {
-      // Prompt for collective analysis
-      const prompt = `Проведи комплексный анализ государственной закупки по 44-ФЗ.
-      Данные:
-      Объект: ${currentProcurement.subject}
-      НМЦК: ${currentProcurement.nmck} руб.
-      ОКПД2: ${currentProcurement.okpd2_code} (${currentProcurement.okpd2_name})
-      ИНН Контрагента: ${currentProcurement.contractor_inn}
-      
-      Верни ответ в формате JSON:
-      {
-        "decision": "GO" | "NO-GO" | "REVIEW",
-        "risk": "low" | "medium" | "high" | "critical",
-        "summary": "Краткое резюме на русском",
-        "details": {
-          "finance": "Анализ финансовой части",
-          "legal": "Правовой анализ",
-          "technical": "Оценка техзадания",
-          "compliance": "Проверка соответствия 44-ФЗ"
-        }
-      }`;
-
-      const model = "gemini-3-flash-preview";
-      const result = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: { responseMimeType: "application/json" }
-      });
-
-      const analysis = JSON.parse(result.text || "{}");
-      
-      // Save result back to server
-      await fetch(`${API_BASE}/api/v1/procurements/${currentProcurement.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          processing_status: 'completed',
-          processing_result: analysis
-        })
-      });
-
+      const res = await fetch(`${API_BASE}/api/v1/procurements/${currentProcurement.id}/analyze`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
       await fetchProcurements();
       const updated = procurements.find(p => p.id === currentProcurement.id);
       if (updated) setCurrentProcurement(updated);
@@ -277,7 +232,7 @@ export default function App() {
                   onTransition={transitionStatus}
                 />
               )}
-              {activeTab === 'agents' && <AgentsTab ai={ai} />}
+              {activeTab === 'agents' && <AgentsTab />}
               {activeTab === 'nmck' && <NmckTab />}
               {activeTab === 'penalty' && <PenaltyTab />}
               {activeTab === 'deadlines' && <DeadlinesTab />}
@@ -510,7 +465,7 @@ function AnalysisDetail({ title, text }: any) {
 
 // --- MODULE TABS ---
 
-function AgentsTab({ ai }: { ai: GoogleGenAI }) {
+function AgentsTab() {
   const [activeAgent, setActiveAgent] = useState('finance');
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
@@ -532,14 +487,13 @@ function AgentsTab({ ai }: { ai: GoogleGenAI }) {
     setLoading(true);
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [
-          { role: 'user', parts: [{ text: (agents as any)[activeAgent].prompt + "\n\nВопрос: " + input }] }
-        ]
+      const res = await fetch(`${API_BASE}/api/v1/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: input, agentPrompt: (agents as any)[activeAgent].prompt })
       });
-      
-      const aiMsg = { role: 'assistant', content: response.text };
+      const data = await res.json();
+      const aiMsg = { role: 'assistant', content: data.response || 'Ошибка ответа' };
       setMessages(prev => [...prev, aiMsg]);
     } catch (e) {
       setMessages(prev => [...prev, { role: 'assistant', content: 'Ошибка при получении ответа от ИИ.' }]);
